@@ -1,4 +1,5 @@
 .env
 venv/*
 ingestion/__pycache__/*
-.env
+
+.vscode/*

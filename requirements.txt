@@ -1,3 +1,4 @@
 pydantic
 httpx
 python-dotenv
+chess
