@@ -3,3 +3,4 @@ httpx
 python-dotenv
 chess
 psycopg[binary]>=3.2
+dvc
