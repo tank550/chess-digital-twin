@@ -22,6 +22,12 @@ CREATE TABLE IF NOT EXISTS moves (
     PRIMARY KEY (game_id, ply)
 );
 
+CREATE TABLE IF NOT EXISTS chess_archive_etags (
+    resource_url TEXT PRIMARY KEY,
+    etag TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE OR REPLACE FUNCTION upsert_chess_games(
     p_games JSONB,
     p_moves JSONB

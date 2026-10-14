@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -14,8 +14,27 @@ ParsedGame = tuple[Game_Details, list[Move_Details]]
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
-def save_games(games: Sequence[ParsedGame]) -> None:
-    """Create the schema if needed and atomically upsert games and their moves."""
+def load_archive_etags() -> dict[str, str]:
+    """Load the persisted HTTP ETags for monthly Chess.com archives."""
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        raise ValueError(
+            "DATABASE_URL is required. Set it to your PostgreSQL connection URL."
+        )
+
+    with psycopg.connect(database_url) as connection:
+        connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+        rows = connection.execute(
+            "SELECT resource_url, etag FROM chess_archive_etags WHERE etag IS NOT NULL"
+        ).fetchall()
+    return {resource_url: etag for resource_url, etag in rows}
+
+
+def save_games(
+    games: Sequence[ParsedGame],
+    archive_etags: Mapping[str, str | None] | None = None,
+) -> None:
+    """Atomically upsert games, moves, and ETags for processed archives."""
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
         raise ValueError(
@@ -51,3 +70,22 @@ def save_games(games: Sequence[ParsedGame]) -> None:
             "SELECT upsert_chess_games(%s::JSONB, %s::JSONB)",
             (Jsonb(games_payload), Jsonb(moves_payload)),
         )
+        if archive_etags:
+            etag_payload = [
+                {"resource_url": resource_url, "etag": etag}
+                for resource_url, etag in archive_etags.items()
+            ]
+            connection.execute(
+                """
+                INSERT INTO chess_archive_etags (resource_url, etag)
+                SELECT state.resource_url, state.etag
+                FROM jsonb_to_recordset(%s::JSONB) AS state(
+                    resource_url TEXT,
+                    etag TEXT
+                )
+                ON CONFLICT (resource_url) DO UPDATE SET
+                    etag = EXCLUDED.etag,
+                    updated_at = NOW()
+                """,
+                (Jsonb(etag_payload),),
+            )

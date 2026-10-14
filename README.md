@@ -43,5 +43,25 @@ batch has been saved.
    ```
 
 The command is safe to rerun: existing games are updated, and their move rows
-are replaced in the same database transaction. Any extraction, parsing, or
-database error stops the import and is reported.
+are replaced in the same database transaction. On its first run it imports
+every archive. Later runs send each month's stored ETag with `If-None-Match`;
+unchanged archives return HTTP 304 and their game bodies are not downloaded.
+Games and changed ETags are committed together, so a failed parse or database
+write cannot advance the cache and skip data on the next run. ETags are stored
+in PostgreSQL, so they persist between ephemeral CI runs without Redis or a
+local cache file.
+
+## Daily GitHub Actions sync
+
+The `.github/workflows/chess-ingestion.yml` workflow runs daily at 04:17 UTC
+and can also be started manually from the repository's Actions tab. Configure
+these repository Actions secrets before enabling it:
+
+- `DATABASE_URL`: connection URL for PostgreSQL reachable from GitHub-hosted
+  runners. A `localhost` URL will refer to the runner, not your PC.
+- `URL_CHESS_COM`: the complete API URL, such as
+  `https://api.chess.com/pub/player/your_username`. GitHub Actions does not
+  expand variables from your local `.env` file.
+
+The username is inferred from `URL_CHESS_COM`; no separate player-name secret
+is needed. The local command continues to load values from `.env`.

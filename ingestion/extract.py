@@ -1,17 +1,17 @@
 import asyncio
 import os
 import sys
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
 import httpx
 from dotenv import load_dotenv
 
 if __package__:
-    from .database import save_games
+    from .database import load_archive_etags, save_games
     from .parsing_pgn import parse_pgn
 else:
-    from database import save_games
+    from database import load_archive_etags, save_games
     from parsing_pgn import parse_pgn
 
 load_dotenv()
@@ -81,15 +81,27 @@ async def get_chess_archive() -> list[str]:
         return await _get_archive_urls(client)
 
 
-async def get_all_chess_games() -> list[dict[str, Any]]:
-    """Fetch every game from all monthly archives of the configured player."""
+async def get_changed_chess_games(
+    cached_etags: Mapping[str, str],
+) -> tuple[list[dict[str, Any]], dict[str, str | None], int, int]:
+    """Fetch only monthly archive bodies whose ETag is new or has changed."""
     async with httpx.AsyncClient(
         timeout=30, headers={"User-Agent": USER_AGENT}
     ) as client:
         archive_urls = await _get_archive_urls(client)
         games: list[dict[str, Any]] = []
+        updated_etags: dict[str, str | None] = {}
+        unchanged_archives = 0
         for archive_url in archive_urls:
-            archive_response = await client.get(archive_url)
+            headers = {}
+            etag = cached_etags.get(archive_url)
+            if etag:
+                headers["If-None-Match"] = etag
+
+            archive_response = await client.get(archive_url, headers=headers)
+            if archive_response.status_code == httpx.codes.NOT_MODIFIED:
+                unchanged_archives += 1
+                continue
             archive_response.raise_for_status()
             archive = archive_response.json()
             archive_games = archive.get("games") if isinstance(archive, dict) else None
@@ -103,18 +115,38 @@ async def get_all_chess_games() -> list[dict[str, Any]]:
                         f"Chess.com returned a game without PGN data: {archive_url}"
                     )
                 games.append(game)
+            updated_etags[archive_url] = archive_response.headers.get("ETag")
 
+    return games, updated_etags, unchanged_archives, len(archive_urls)
+
+
+async def get_all_chess_games() -> list[dict[str, Any]]:
+    """Fetch every archive body, bypassing previously stored ETags."""
+    games, _, _, _ = await get_changed_chess_games({})
     return games
 
 
 async def ingest_all_chess_games() -> int:
-    """Fetch, parse, and persist the player's complete Chess.com game history."""
+    """Incrementally fetch, parse, and persist Chess.com archive changes."""
     player_name = _player_name()
-    archive_games = await get_all_chess_games()
+    cached_etags = load_archive_etags()
+    (
+        archive_games,
+        updated_etags,
+        unchanged_archives,
+        checked_archives,
+    ) = await get_changed_chess_games(cached_etags)
     parsed_games = []
     total = len(archive_games)
+    print(
+        f"Checked {checked_archives} monthly archives: {unchanged_archives} "
+        f"unchanged, {checked_archives - unchanged_archives} changed."
+    )
     if total == 0:
-        print("No games found in the Chess.com archives.")
+        print(
+            f"No changed games found ({unchanged_archives}/{checked_archives} "
+            "monthly archives unchanged)."
+        )
     else:
         _print_progress(0, total)
         for index, game in enumerate(archive_games, start=1):
@@ -132,12 +164,15 @@ async def ingest_all_chess_games() -> int:
             _print_progress(index, total)
         print()
 
-    print(f"Saving {total} games and their moves to PostgreSQL...")
-    save_games(parsed_games)
+    print(
+        f"Saving {total} changed games and {len(updated_etags)} archive ETags "
+        "to PostgreSQL..."
+    )
+    save_games(parsed_games, updated_etags)
     if total:
-        print(f"Saved {total}/{total} games (100.0%).")
+        print(f"Saved {total}/{total} changed games (100.0%).")
     else:
-        print("Database save complete.")
+        print("Archive ETags saved; no game rows changed.")
     return len(parsed_games)
 
 
